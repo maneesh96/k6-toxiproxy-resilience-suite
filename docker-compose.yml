@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: res-postgres
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: product_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d product_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - resilience-network
+
+  product-service:
+    image: node:18-alpine
+    container_name: res-product-service
+    working_dir: /usr/src/app
+    volumes:
+      - .:/usr/src/app
+    command: sh -c "npm install && npm run start:product"
+    ports:
+      - "3001:3001"
+    environment:
+      DB_HOST: postgres
+      DB_USER: user
+      DB_PASSWORD: password
+      DB_DATABASE: product_db
+      DB_PORT: 5432
+      PORT: 3001
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - resilience-network
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.5.0
+    container_name: res-toxiproxy
+    command: -host 0.0.0.0
+    ports:
+      - "8474:8474" # Control API
+      - "8080:8080" # Proxy Port mapping
+    depends_on:
+      - product-service
+    networks:
+      - resilience-network
+
+  api-gateway:
+    image: node:18-alpine
+    container_name: res-api-gateway
+    working_dir: /usr/src/app
+    volumes:
+      - .:/usr/src/app
+    command: sh -c "npm install && npm run start:gateway"
+    ports:
+      - "3000:3000"
+    environment:
+      PRODUCT_SERVICE_URL: http://toxiproxy:8080/products
+      PORT: 3000
+    depends_on:
+      - toxiproxy
+    networks:
+      - resilience-network
+
+networks:
+  resilience-network:
+    name: resilience-network
