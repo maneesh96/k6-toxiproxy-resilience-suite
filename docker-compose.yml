@@ -1,0 +1,65 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: res-postgres
+    env_file: .env
+    volumes:
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - resilience-network
+
+  product-service:
+    build: .
+    image: k6-resilience-node:local
+    container_name: res-product-service
+    init: true
+    command: ["node", "product-service.js"]
+    env_file: .env
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      PORT: "3001"
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - resilience-network
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.5.0
+    container_name: res-toxiproxy
+    command: ["-host", "0.0.0.0"]
+    ports:
+      - "8474:8474" # Control API
+      - "8080:8080" # Proxied product-service
+    depends_on:
+      - product-service
+    networks:
+      - resilience-network
+
+  api-gateway:
+    image: k6-resilience-node:local
+    container_name: res-api-gateway
+    init: true
+    command: ["node", "gateway.js"]
+    environment:
+      PRODUCT_SERVICE_URL: http://toxiproxy:8080/products
+      PORT: "3000"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - toxiproxy
+      - product-service
+    networks:
+      - resilience-network
+
+networks:
+  resilience-network:
+    name: resilience-network
