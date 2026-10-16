@@ -33,7 +33,10 @@ jobs:
       - name: Validate docker-compose.yml
         run: |
           cp .env.example .env
-          docker compose config --quiet
+          docker compose --profile load config --quiet
 
       - name: Build service image
         run: docker compose build
+
+      - name: Validate k6 script and options
+        run: docker compose --profile load run --rm --no-deps k6 inspect /scripts/load-test.js

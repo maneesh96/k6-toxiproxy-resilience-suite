@@ -60,6 +60,21 @@ services:
     networks:
       - resilience-network
 
+  # Load generator. Behind the "load" profile so `docker compose up` starts
+  # only the system under test; run it with
+  #   docker compose --profile load run --rm k6 run /scripts/load-test.js
+  k6:
+    image: grafana/k6:1.0.0
+    profiles: ["load"]
+    environment:
+      GATEWAY_URL: http://api-gateway:3000
+    volumes:
+      - ./load-test.js:/scripts/load-test.js:ro
+    depends_on:
+      - api-gateway
+    networks:
+      - resilience-network
+
 networks:
   resilience-network:
     name: resilience-network
