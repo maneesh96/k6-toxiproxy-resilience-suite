@@ -26,6 +26,12 @@ services:
       PORT: "3001"
     ports:
       - "3001:3001"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
     depends_on:
       postgres:
         condition: service_healthy
@@ -40,7 +46,8 @@ services:
       - "8474:8474" # Control API
       - "8080:8080" # Proxied product-service
     depends_on:
-      - product-service
+      product-service:
+        condition: service_healthy
     networks:
       - resilience-network
 
@@ -54,14 +61,23 @@ services:
       PORT: "3000"
     ports:
       - "3000:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
     depends_on:
-      - toxiproxy
-      - product-service
+      toxiproxy:
+        condition: service_started
+      product-service:
+        condition: service_healthy
     networks:
       - resilience-network
 
   # Load generator. Behind the "load" profile so `docker compose up` starts
-  # only the system under test; run it with
+  # only the system under test. run-suite.js drives it once per phase; a
+  # single ad-hoc run is
   #   docker compose --profile load run --rm k6 run /scripts/load-test.js
   k6:
     image: grafana/k6:1.0.0
@@ -70,8 +86,10 @@ services:
       GATEWAY_URL: http://api-gateway:3000
     volumes:
       - ./load-test.js:/scripts/load-test.js:ro
+      - ./results:/results
     depends_on:
-      - api-gateway
+      api-gateway:
+        condition: service_healthy
     networks:
       - resilience-network
 

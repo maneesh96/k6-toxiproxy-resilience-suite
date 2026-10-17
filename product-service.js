@@ -51,8 +51,15 @@ app.get('/products', async (req, res) => {
   }
 });
 
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'product-service' });
+// Healthy only when the database answers, so dependants never start against a
+// service that would fail its first real request.
+app.get('/health', async (req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    res.json({ status: 'ok', service: 'product-service' });
+  } catch {
+    res.status(503).json({ status: 'unavailable', service: 'product-service' });
+  }
 });
 
 app.listen(PORT, () => {

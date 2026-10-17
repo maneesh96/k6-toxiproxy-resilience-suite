@@ -9,7 +9,8 @@
   "scripts": {
     "start:gateway": "node gateway.js",
     "start:product": "node product-service.js",
-    "check": "node --check gateway.js && node --check product-service.js && node --check load-test.js"
+    "suite": "node run-suite.js",
+    "check": "node --check gateway.js && node --check product-service.js && node --check load-test.js && node --check run-suite.js"
   },
   "dependencies": {
     "axios": "^1.4.0",
