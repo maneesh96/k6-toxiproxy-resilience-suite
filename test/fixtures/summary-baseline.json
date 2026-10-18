@@ -1,0 +1,57 @@
+{
+  "root_group": {
+    "name": "",
+    "path": "",
+    "id": "d41d8cd98f00b204e9800998ecf8427e",
+    "groups": [],
+    "checks": []
+  },
+  "metrics": {
+    "http_reqs": {
+      "count": 400,
+      "rate": 40.0
+    },
+    "http_req_duration": {
+      "avg": 12.5,
+      "min": 5.0,
+      "med": 10.0,
+      "max": 48.0,
+      "p(90)": 22.5,
+      "p(95)": 25.0,
+      "p(99)": 40.0,
+      "thresholds": {
+        "p(95)<200": false,
+        "p(99)<500": false
+      }
+    },
+    "http_req_failed": {
+      "passes": 0,
+      "fails": 400,
+      "value": 0,
+      "thresholds": {
+        "rate<0.01": false
+      }
+    },
+    "checks": {
+      "passes": 800,
+      "fails": 0,
+      "value": 1,
+      "thresholds": {
+        "rate>0.99": false
+      }
+    },
+    "degraded_responses": {
+      "passes": 0,
+      "fails": 400,
+      "value": 0,
+      "thresholds": {
+        "rate<0.01": false
+      }
+    },
+    "vus": {
+      "value": 0,
+      "min": 0,
+      "max": 5
+    }
+  }
+}

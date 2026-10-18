@@ -10,7 +10,9 @@
     "start:gateway": "node gateway.js",
     "start:product": "node product-service.js",
     "suite": "node run-suite.js",
-    "check": "node --check gateway.js && node --check product-service.js && node --check load-test.js && node --check run-suite.js"
+    "check": "node --check gateway.js && node --check product-service.js && node --check load-test.js && node --check run-suite.js && node --check report.js",
+    "report": "node report.js",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "axios": "^1.4.0",

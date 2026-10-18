@@ -15,6 +15,8 @@ const SLEEP_DURATION = parseFloat(__ENV.SLEEP_DURATION || '0.1');
 const degradedResponses = new Rate('degraded_responses');
 
 export const options = {
+  // p(99) is not exported by default; report.js needs it next to p(95).
+  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)'],
   stages: [
     { duration: __ENV.RAMP_UP || '5s', target: VUS },
     { duration: __ENV.DURATION || '30s', target: VUS },

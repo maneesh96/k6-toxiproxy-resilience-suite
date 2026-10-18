@@ -2,10 +2,12 @@
 // starts the stack, waits until every hop answers, configures Toxiproxy,
 // then runs k6 (in its container) once per phase with the phase's toxics.
 //
-// Raw k6 summaries and a phase manifest are written to results/. A k6
+// Raw k6 summaries, a phase manifest and the report built from them
+// (report.md / report.json, see report.js) are written to results/. A k6
 // threshold breach is recorded, not treated as a suite failure: chaos phases
-// are expected to breach the baseline SLOs. The process exits non-zero only
-// when the experiment itself could not be carried out.
+// are expected to breach the baseline SLOs, and each phase states what it
+// expects to happen. The process exits non-zero only when the experiment
+// itself could not be carried out.
 //
 // Environment overrides:
 //   VUS, RAMP_UP, DURATION, RAMP_DOWN, SLEEP_DURATION  forwarded to load-test.js
@@ -16,6 +18,7 @@
 const { spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { writeReport } = require('./report');
 
 const ROOT = __dirname;
 const RESULTS_DIR = path.join(ROOT, 'results');
@@ -45,6 +48,8 @@ const PHASES = [
     name: 'Steady-state baseline',
     targetPath: '/products/naive',
     chaos: 'none',
+    hypothesis: 'With no fault injected the naive path meets every baseline SLO.',
+    expectations: [{ kind: 'all-slos', outcome: 'met' }],
     toxics: []
   },
   {
@@ -52,6 +57,8 @@ const PHASES = [
     name: 'Unmitigated downstream latency',
     targetPath: '/products/naive',
     chaos: 'latency 2000ms +/- 500ms',
+    hypothesis: 'Without a timeout budget the downstream latency reaches the caller in full, breaching the latency SLO.',
+    expectations: [{ kind: 'slo', metric: 'http_req_duration', outcome: 'breached' }],
     toxics: [LATENCY_TOXIC]
   },
   {
@@ -59,6 +66,8 @@ const PHASES = [
     name: 'Bandwidth starvation and payload slicing',
     targetPath: '/products/naive',
     chaos: 'bandwidth 10 KB/s + 10-byte slices',
+    hypothesis: 'A starved, fragmented downstream link pushes response times past the latency SLO.',
+    expectations: [{ kind: 'slo', metric: 'http_req_duration', outcome: 'breached' }],
     toxics: [
       {
         name: 'bandwidth_downstream',
@@ -81,6 +90,13 @@ const PHASES = [
     name: 'Downstream latency behind circuit breaker',
     targetPath: '/products/resilient',
     chaos: 'latency 2000ms +/- 500ms',
+    hypothesis: 'Under the same latency as phase 2 the circuit breaker sheds the slow calls: '
+      + 'callers get the degraded fallback instead of errors, and tail latency stays below phase 2.',
+    expectations: [
+      { kind: 'slo', metric: 'http_req_failed', outcome: 'met' },
+      { kind: 'slo', metric: 'degraded_responses', outcome: 'breached' },
+      { kind: 'lower-than-phase', stat: 'p95', phase: 2 }
+    ],
     toxics: [LATENCY_TOXIC]
   }
 ];
@@ -239,6 +255,8 @@ async function main() {
         name: phase.name,
         targetPath: phase.targetPath,
         chaos: phase.chaos,
+        hypothesis: phase.hypothesis,
+        expectations: phase.expectations,
         ...outcome
       });
     }
@@ -246,7 +264,13 @@ async function main() {
 
     const manifestPath = path.join(RESULTS_DIR, 'phases.json');
     fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    const report = writeReport(RESULTS_DIR);
     console.log(`\nAll ${PHASES.length} phases completed; results in ${path.relative(ROOT, RESULTS_DIR)}/`);
+    for (const phase of report.phases) {
+      const slos = phase.slosMet ? 'met' : 'breached';
+      const verdict = phase.hypothesisConfirmed ? 'confirmed' : 'NOT confirmed';
+      console.log(`Phase ${phase.id}: baseline SLOs ${slos}, hypothesis ${verdict}`);
+    }
   } finally {
     if (KEEP_STACK_UP) {
       await clearToxics().catch(() => {});
