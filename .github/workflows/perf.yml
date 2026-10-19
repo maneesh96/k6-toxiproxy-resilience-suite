@@ -4,6 +4,14 @@ on:
   push:
     branches: [main, staging]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      vus:
+        description: Peak virtual users per phase
+        default: "10"
+      duration:
+        description: Steady-state duration per phase (k6 duration, e.g. 15s, 2m)
+        default: 15s
 
 permissions:
   contents: read
@@ -11,7 +19,7 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
 
@@ -38,26 +46,62 @@ jobs:
           cp .env.example .env
           docker compose --profile load config --quiet
 
-      - name: Build service image
-        run: docker compose build
-
       - name: Validate k6 script and options
         run: docker compose --profile load run --rm --no-deps k6 inspect /scripts/load-test.js
 
-      # Short durations: this proves the orchestration end to end (stack
-      # healthchecks, proxy setup, all four phases, summaries written), not
-      # the performance numbers themselves.
-      - name: Run resilience suite (smoke durations)
+  resilience:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Create .env from the example
+        run: cp .env.example .env
+
+      # Short phases keep every push affordable while still producing real
+      # numbers for all four phases; run the workflow manually with larger
+      # inputs for a longer experiment.
+      - name: Run resilience suite
         env:
-          VUS: "5"
-          RAMP_UP: 2s
-          DURATION: 5s
+          VUS: ${{ inputs.vus || '10' }}
+          RAMP_UP: 3s
+          DURATION: ${{ inputs.duration || '15s' }}
           RAMP_DOWN: 2s
           KEEP_STACK_UP: "1"
+        run: npm run suite
+
+      - name: Write comparison table to job summary
+        if: always()
         run: |
-          npm run suite
-          cat results/report.md
+          if [ -f results/summary.md ]; then
+            cat results/summary.md >> "$GITHUB_STEP_SUMMARY"
+            echo "Full report: see the resilience-results artifact (report.md)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "The suite did not produce a report; see the 'Run resilience suite' step log." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: resilience-results
+          path: results/
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Container logs
         if: failure()
         run: docker compose logs --no-color --tail 200
+
+      - name: Stop stack
+        if: always()
+        run: docker compose --profile load down --volumes --remove-orphans

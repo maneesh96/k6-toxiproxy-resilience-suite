@@ -3,11 +3,11 @@
 // then runs k6 (in its container) once per phase with the phase's toxics.
 //
 // Raw k6 summaries, a phase manifest and the report built from them
-// (report.md / report.json, see report.js) are written to results/. A k6
-// threshold breach is recorded, not treated as a suite failure: chaos phases
-// are expected to breach the baseline SLOs, and each phase states what it
-// expects to happen. The process exits non-zero only when the experiment
-// itself could not be carried out.
+// (report.md / report.json / summary.md, see report.js) are written to
+// results/. A k6 threshold breach is recorded, not treated as a suite
+// failure: chaos phases are expected to breach the baseline SLOs, and each
+// phase states what it expects to happen. The process exits non-zero only
+// when the experiment itself could not be carried out.
 //
 // Environment overrides:
 //   VUS, RAMP_UP, DURATION, RAMP_DOWN, SLEEP_DURATION  forwarded to load-test.js

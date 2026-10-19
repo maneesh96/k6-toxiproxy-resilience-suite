@@ -18,6 +18,7 @@ const path = require('path');
 const MANIFEST_FILE = 'phases.json';
 const REPORT_JSON = 'report.json';
 const REPORT_MD = 'report.md';
+const SUMMARY_MD = 'summary.md';
 
 // Stats compared against the baseline phase. `unit` drives how a delta is shown.
 const STATS = [
@@ -261,6 +262,36 @@ function renderMarkdown(report) {
   return `${lines.join('\n').trimEnd()}\n`;
 }
 
+// Compact one-row-per-phase comparison for the CI job summary, where the
+// full report's wide per-metric table is hard to scan.
+function renderSummaryTable(report) {
+  const byKey = Object.fromEntries(STATS.map((s) => [s.key, s]));
+  const cell = (phase, key) => formatValue(byKey[key], phase.metrics[key]) + formatDelta(byKey[key], phase.deltas[key]);
+  const lines = [
+    '## Resilience suite',
+    '',
+    `Hypotheses confirmed: ${report.hypothesesConfirmed} of ${report.phases.length}. ` +
+      `Deltas are against phase ${report.baselinePhase} (baseline).`,
+    '',
+    '| Phase | Endpoint | Chaos | Throughput | P95 latency | HTTP errors | Degraded | Baseline SLOs | Hypothesis |',
+    '| :--- | :--- | :--- | ---: | ---: | ---: | ---: | :--- | :--- |'
+  ];
+  for (const phase of report.phases) {
+    lines.push(`| ${[
+      `${phase.id}. ${escapeCell(phase.name)}`,
+      `\`${phase.targetPath}\``,
+      escapeCell(phase.chaos),
+      cell(phase, 'rps'),
+      cell(phase, 'p95'),
+      cell(phase, 'errorRate'),
+      cell(phase, 'degradedRate'),
+      phase.slosMet ? 'met' : 'breached',
+      phase.hypothesisConfirmed ? 'confirmed' : 'not confirmed'
+    ].join(' | ')} |`);
+  }
+  return `${lines.join('\n')}\n`;
+}
+
 function readJson(file) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
@@ -275,10 +306,11 @@ function writeReport(resultsDir) {
   const report = buildReport(manifest, summaries);
   fs.writeFileSync(path.join(resultsDir, REPORT_JSON), `${JSON.stringify(report, null, 2)}\n`);
   fs.writeFileSync(path.join(resultsDir, REPORT_MD), renderMarkdown(report));
+  fs.writeFileSync(path.join(resultsDir, SUMMARY_MD), renderSummaryTable(report));
   return report;
 }
 
-module.exports = { extractMetrics, evaluateExpectation, buildReport, renderMarkdown, writeReport };
+module.exports = { extractMetrics, evaluateExpectation, buildReport, renderMarkdown, renderSummaryTable, writeReport };
 
 if (require.main === module) {
   const resultsDir = path.resolve(process.argv[2] || path.join(__dirname, 'results'));

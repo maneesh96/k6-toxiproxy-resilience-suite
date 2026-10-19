@@ -4,7 +4,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { extractMetrics, evaluateExpectation, buildReport, renderMarkdown, writeReport } = require('../report');
+const {
+  extractMetrics, evaluateExpectation, buildReport, renderMarkdown, renderSummaryTable, writeReport
+} = require('../report');
 
 const FIXTURES = path.join(__dirname, 'fixtures');
 const load = (name) => JSON.parse(fs.readFileSync(path.join(FIXTURES, name), 'utf8'));
@@ -163,7 +165,27 @@ test('renderMarkdown shows measured values with deltas and verdicts', () => {
   assert.match(md, /Confirmed: http_req_duration SLO breached \(observed: breached\)/);
 });
 
-test('writeReport reads results/ and writes report.md and report.json', () => {
+test('renderSummaryTable has one row per phase with deltas and verdicts', () => {
+  const md = renderSummaryTable(buildReport(manifest(), summaries()));
+  const rows = md.split('\n').filter((line) => /^\| \d+\. /.test(line));
+  assert.equal(rows.length, 3);
+  assert.match(md, /Hypotheses confirmed: 3 of 3/);
+  assert.equal(
+    rows[0],
+    '| 1. Steady-state baseline | `/products/naive` | none | 40.0 req/s | 25.0 ms | 0.00% | 0.00% | met | confirmed |'
+  );
+  assert.match(rows[1], /\| 2\.0 req\/s \(-38\.0, -95%\) \| 2450\.0 ms \(\+2425\.0 ms, \+9700%\) \|/);
+  assert.match(rows[2], /\| 100\.00% \(\+100\.00 pp\) \| breached \| confirmed \|$/);
+});
+
+test('renderSummaryTable escapes pipes so a chaos label cannot break the table', () => {
+  const m = manifest();
+  m.phases[1].chaos = 'latency | jitter';
+  const md = renderSummaryTable(buildReport(m, summaries()));
+  assert.match(md, /latency \\\| jitter/);
+});
+
+test('writeReport reads results/ and writes report.md, report.json and summary.md', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'resilience-report-'));
   try {
     const m = manifest();
@@ -178,6 +200,7 @@ test('writeReport reads results/ and writes report.md and report.json', () => {
     assert.equal(report.phases.length, 3);
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'report.json'), 'utf8')), report);
     assert.match(fs.readFileSync(path.join(dir, 'report.md'), 'utf8'), /^# Resilience suite report/);
+    assert.match(fs.readFileSync(path.join(dir, 'summary.md'), 'utf8'), /^## Resilience suite/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
