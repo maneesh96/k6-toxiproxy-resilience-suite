@@ -4,5 +4,5 @@ WORKDIR /usr/src/app
 ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
-COPY gateway.js product-service.js ./
+COPY gateway.js breaker-metrics.js product-service.js ./
 USER node

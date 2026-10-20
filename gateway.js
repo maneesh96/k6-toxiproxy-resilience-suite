@@ -4,6 +4,7 @@ const http = require('http');
 const winston = require('winston');
 const CircuitBreaker = require('opossum');
 const promClient = require('prom-client');
+const { registerBreakerMetrics } = require('./breaker-metrics');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const DOWNSTREAM_URL = process.env.PRODUCT_SERVICE_URL || 'http://toxiproxy:8080/products';
@@ -20,7 +21,8 @@ const logger = winston.createLogger({
   ]
 });
 
-// Setup Prometheus registry for basic metrics (optional, for observability)
+// Prometheus registry: process metrics plus the circuit breaker's state and
+// events (see breaker-metrics.js), served on /metrics.
 const register = new promClient.Registry();
 promClient.collectDefaultMetrics({ register });
 
@@ -59,7 +61,11 @@ const breakerOptions = {
   capacity: 50                    // Bulkhead: Max 50 concurrent requests in flight
 };
 
-const productServiceBreaker = new CircuitBreaker(callProductServiceResilient, breakerOptions);
+const productServiceBreaker = new CircuitBreaker(callProductServiceResilient, {
+  ...breakerOptions,
+  name: 'product_service'
+});
+registerBreakerMetrics(productServiceBreaker, register, productServiceBreaker.name);
 
 // Fallback behavior
 productServiceBreaker.fallback(() => {
@@ -115,7 +121,7 @@ app.get('/products/resilient', async (req, res) => {
   }
 });
 
-// Observability metrics endpoint
+// Prometheus scrape endpoint, including gateway_circuit_breaker_state
 app.get('/metrics', async (req, res) => {
   try {
     res.set('Content-Type', register.contentType);

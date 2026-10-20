@@ -42,10 +42,18 @@ function manifest() {
         targetPath: '/products/resilient',
         chaos: 'latency 2000ms +/- 500ms',
         summaryFile: 'phase3_summary.json',
+        thresholds: { http_req_failed: ['rate<0.01'], http_req_duration: ['p(99)<1000'] },
+        circuitBreaker: {
+          stateBefore: 'closed',
+          stateAfter: 'open',
+          events: { success: 0, failure: 10, timeout: 10, reject: 370, fallback: 380, open: 1, halfOpen: 0, close: 0 }
+        },
         expectations: [
           { kind: 'slo', metric: 'http_req_failed', outcome: 'met' },
           { kind: 'slo', metric: 'degraded_responses', outcome: 'breached' },
-          { kind: 'lower-than-phase', stat: 'p95', phase: 2 }
+          { kind: 'lower-than-phase', stat: 'p95', phase: 2 },
+          { kind: 'phase-slos', outcome: 'met' },
+          { kind: 'breaker-event', event: 'open', outcome: 'occurred' }
         ]
       }
     ]
@@ -70,6 +78,16 @@ test('extractMetrics treats a threshold value of true as crossed', () => {
   const failed = thresholds.find((t) => t.metric === 'http_req_failed');
   assert.equal(p95.passed, false);
   assert.equal(failed.passed, true);
+});
+
+test('extractMetrics separates phase SLOs on suite_phase sub-metrics from baseline SLOs', () => {
+  const thresholds = extractMetrics(resilientLatency).thresholds;
+  const phase = thresholds.filter((t) => t.scope === 'phase');
+  assert.deepEqual(phase, [
+    { metric: 'http_req_duration', expression: 'p(99)<1000', scope: 'phase', passed: true },
+    { metric: 'http_req_failed', expression: 'rate<0.01', scope: 'phase', passed: true }
+  ]);
+  assert.equal(thresholds.filter((t) => t.scope === 'baseline').length, 5);
 });
 
 test('extractMetrics reports a stat missing from the export as null', () => {
@@ -114,7 +132,53 @@ test('all expectations must hold for a hypothesis to be confirmed', () => {
   const report2 = buildReport(brokenBreaker, new Map([[1, baseline], [2, naiveLatency], [3, errors]]));
   const phase3 = report2.phases[2];
   assert.equal(phase3.hypothesisConfirmed, false);
-  assert.deepEqual(phase3.expectations.map((e) => e.confirmed), [false, true, true]);
+  assert.deepEqual(phase3.expectations.map((e) => e.confirmed), [false, true, true, true, true]);
+});
+
+test('baseline SLOs ignore phase thresholds, and phase SLOs are reported on their own', () => {
+  const [phase1, phase2, phase3] = buildReport(manifest(), summaries()).phases;
+  assert.equal(phase3.slosMet, false);
+  assert.equal(phase3.phaseSlosMet, true);
+  assert.equal(phase1.phaseSlosMet, null);
+  assert.equal(phase2.phaseSlosMet, null);
+});
+
+test('phase-slos is not confirmed when a phase threshold was crossed', () => {
+  const crossed = structuredClone(resilientLatency);
+  crossed.metrics['http_req_duration{suite_phase:3}'].thresholds['p(99)<1000'] = true;
+  const result = evaluateExpectation({ kind: 'phase-slos', outcome: 'met' }, extractMetrics(crossed), new Map());
+  assert.equal(result.confirmed, false);
+  assert.equal(result.observed, 'breached');
+});
+
+test('phase-slos is not confirmed when the phase set no thresholds', () => {
+  const result = evaluateExpectation({ kind: 'phase-slos', outcome: 'met' }, extractMetrics(baseline), new Map());
+  assert.equal(result.confirmed, false);
+  assert.equal(result.observed, 'no thresholds');
+});
+
+test('breaker-event counts the events recorded during the phase', () => {
+  const metrics = extractMetrics(resilientLatency);
+  const opened = { stateAfter: 'open', events: { open: 1 } };
+  const stayedClosed = { stateAfter: 'closed', events: { open: 0 } };
+  const occurred = { kind: 'breaker-event', event: 'open', outcome: 'occurred' };
+  const none = { kind: 'breaker-event', event: 'open', outcome: 'none' };
+
+  assert.equal(evaluateExpectation(occurred, metrics, new Map(), opened).confirmed, true);
+  assert.equal(evaluateExpectation(occurred, metrics, new Map(), stayedClosed).confirmed, false);
+  assert.equal(evaluateExpectation(none, metrics, new Map(), stayedClosed).confirmed, true);
+  assert.equal(evaluateExpectation(occurred, metrics, new Map(), opened).observed, '1x');
+});
+
+test('breaker-event is not confirmed without a breaker reading', () => {
+  const result = evaluateExpectation(
+    { kind: 'breaker-event', event: 'open', outcome: 'occurred' },
+    extractMetrics(resilientLatency),
+    new Map(),
+    null
+  );
+  assert.equal(result.confirmed, false);
+  assert.equal(result.observed, 'not measured');
 });
 
 test('a baseline that breaches its SLOs is not confirmed', () => {
@@ -163,6 +227,9 @@ test('renderMarkdown shows measured values with deltas and verdicts', () => {
   assert.match(md, /\| Degraded \(fallback\) responses \| 0\.00% \| 0\.00% \(\+0\.00 pp\) \| 100\.00% \(\+100\.00 pp\) \|/);
   assert.match(md, /\| Baseline SLOs \| met \| breached \| breached \|/);
   assert.match(md, /Confirmed: http_req_duration SLO breached \(observed: breached\)/);
+  assert.match(md, /\| Phase SLOs \| none set \| none set \| met \|/);
+  assert.match(md, /\| Circuit breaker \| n\/a \| n\/a \| open; 1 opened, 10 timeouts, 370 rejected, 380 fallbacks \|/);
+  assert.match(md, /- Phase 3\n {2}- Baseline: .*\n {2}- Phase: http_req_duration `p\(99\)<1000` met; http_req_failed `rate<0\.01` met/);
 });
 
 test('renderSummaryTable has one row per phase with deltas and verdicts', () => {
@@ -172,10 +239,10 @@ test('renderSummaryTable has one row per phase with deltas and verdicts', () => 
   assert.match(md, /Hypotheses confirmed: 3 of 3/);
   assert.equal(
     rows[0],
-    '| 1. Steady-state baseline | `/products/naive` | none | 40.0 req/s | 25.0 ms | 0.00% | 0.00% | met | confirmed |'
+    '| 1. Steady-state baseline | `/products/naive` | none | 40.0 req/s | 25.0 ms | 0.00% | 0.00% | met | none set | n/a | confirmed |'
   );
   assert.match(rows[1], /\| 2\.0 req\/s \(-38\.0, -95%\) \| 2450\.0 ms \(\+2425\.0 ms, \+9700%\) \|/);
-  assert.match(rows[2], /\| 100\.00% \(\+100\.00 pp\) \| breached \| confirmed \|$/);
+  assert.match(rows[2], /\| 100\.00% \(\+100\.00 pp\) \| breached \| met \| open \(1 opened\) \| confirmed \|$/);
 });
 
 test('renderSummaryTable escapes pipes so a chaos label cannot break the table', () => {

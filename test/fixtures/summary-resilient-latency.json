@@ -24,7 +24,27 @@
         "p(99)<500": true
       }
     },
+    "http_req_duration{suite_phase:3}": {
+      "avg": 60.0,
+      "min": 1.0,
+      "med": 2.0,
+      "max": 966.0,
+      "p(90)": 720.0,
+      "p(95)": 800.0,
+      "p(99)": 805.0,
+      "thresholds": {
+        "p(99)<1000": false
+      }
+    },
     "http_req_failed": {
+      "passes": 0,
+      "fails": 380,
+      "value": 0,
+      "thresholds": {
+        "rate<0.01": false
+      }
+    },
+    "http_req_failed{suite_phase:3}": {
       "passes": 0,
       "fails": 380,
       "value": 0,

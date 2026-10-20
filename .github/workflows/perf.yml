@@ -79,6 +79,12 @@ jobs:
           KEEP_STACK_UP: "1"
         run: npm run suite
 
+      # The stack is still up (KEEP_STACK_UP), so this shows where the
+      # breaker ended after phase 4 and its event totals for the whole run.
+      - name: Circuit breaker metrics
+        if: always()
+        run: curl -fsS http://localhost:3000/metrics | grep '^gateway_circuit_breaker' || echo "Gateway not reachable"
+
       - name: Write comparison table to job summary
         if: always()
         run: |

@@ -14,20 +14,50 @@ const SLEEP_DURATION = parseFloat(__ENV.SLEEP_DURATION || '0.1');
 // response is a successful HTTP exchange but not a successful product read.
 const degradedResponses = new Rate('degraded_responses');
 
+// Baseline SLOs: the same yardstick for every phase, so phases compare.
+// Chaos phases are expected to breach some of these.
+const BASELINE_THRESHOLDS = {
+  http_req_failed: ['rate<0.01'],
+  http_req_duration: ['p(95)<200', 'p(99)<500'],
+  checks: ['rate>0.99'],
+  degraded_responses: ['rate<0.01']
+};
+
+// Phase SLOs: what a phase must still guarantee under its own fault, passed
+// by run-suite.js as JSON ({"metric": ["expression", ...]}). They are set on
+// a sub-metric filtered by the suite_phase tag every sample carries, so k6
+// reports them separately from the baseline SLOs on the same metric.
+const PHASE_ID = __ENV.PHASE_ID || 'adhoc';
+const PHASE_TAG = `suite_phase:${PHASE_ID}`;
+
+function phaseThresholds(raw) {
+  if (!raw) return {};
+  const parsed = JSON.parse(raw);
+  const thresholds = {};
+  for (const [metric, expressions] of Object.entries(parsed)) {
+    if (!(metric in BASELINE_THRESHOLDS)) {
+      throw new Error(`PHASE_THRESHOLDS: unknown metric ${metric}`);
+    }
+    if (!Array.isArray(expressions) || expressions.length === 0) {
+      throw new Error(`PHASE_THRESHOLDS: ${metric} needs a non-empty list of expressions`);
+    }
+    thresholds[`${metric}{${PHASE_TAG}}`] = expressions;
+  }
+  return thresholds;
+}
+
 export const options = {
   // p(99) is not exported by default; report.js needs it next to p(95).
   summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)'],
+  tags: { suite_phase: PHASE_ID },
   stages: [
     { duration: __ENV.RAMP_UP || '5s', target: VUS },
     { duration: __ENV.DURATION || '30s', target: VUS },
     { duration: __ENV.RAMP_DOWN || '5s', target: 0 }
   ],
   thresholds: {
-    // Baseline SLOs. Chaos phases are expected to breach some of these.
-    http_req_failed: ['rate<0.01'],
-    http_req_duration: ['p(95)<200', 'p(99)<500'],
-    checks: ['rate>0.99'],
-    degraded_responses: ['rate<0.01']
+    ...BASELINE_THRESHOLDS,
+    ...phaseThresholds(__ENV.PHASE_THRESHOLDS)
   }
 };
 

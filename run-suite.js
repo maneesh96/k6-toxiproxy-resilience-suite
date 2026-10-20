@@ -9,6 +9,12 @@
 // phase states what it expects to happen. The process exits non-zero only
 // when the experiment itself could not be carried out.
 //
+// Every phase is measured against two sets of k6 thresholds: the baseline
+// SLOs in load-test.js (one yardstick for all phases) and the phase's own
+// `thresholds` below, i.e. what that phase must still guarantee under its
+// fault. The gateway's circuit-breaker metrics are scraped before and after
+// each phase so the report shows what the breaker did.
+//
 // Environment overrides:
 //   VUS, RAMP_UP, DURATION, RAMP_DOWN, SLEEP_DURATION  forwarded to load-test.js
 //   TOXIPROXY_API_URL  default http://localhost:8474
@@ -19,6 +25,7 @@ const { spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { writeReport } = require('./report');
+const { readBreakerMetrics, diffBreakerMetrics } = require('./breaker-metrics');
 
 const ROOT = __dirname;
 const RESULTS_DIR = path.join(ROOT, 'results');
@@ -26,6 +33,7 @@ const TOXIPROXY_API = process.env.TOXIPROXY_API_URL || 'http://localhost:8474';
 const GATEWAY_URL = process.env.GATEWAY_URL || 'http://localhost:3000';
 const KEEP_STACK_UP = process.env.KEEP_STACK_UP === '1';
 const K6_OVERRIDES = ['VUS', 'RAMP_UP', 'DURATION', 'RAMP_DOWN', 'SLEEP_DURATION'];
+const BREAKER_NAME = 'product_service';
 
 const PROXY = {
   name: 'product_service',
@@ -49,6 +57,8 @@ const PHASES = [
     targetPath: '/products/naive',
     chaos: 'none',
     hypothesis: 'With no fault injected the naive path meets every baseline SLO.',
+    // The baseline SLOs are this phase's SLOs; nothing to add.
+    thresholds: {},
     expectations: [{ kind: 'all-slos', outcome: 'met' }],
     toxics: []
   },
@@ -57,8 +67,18 @@ const PHASES = [
     name: 'Unmitigated downstream latency',
     targetPath: '/products/naive',
     chaos: 'latency 2000ms +/- 500ms',
-    hypothesis: 'Without a timeout budget the downstream latency reaches the caller in full, breaching the latency SLO.',
-    expectations: [{ kind: 'slo', metric: 'http_req_duration', outcome: 'breached' }],
+    hypothesis: 'Without a timeout budget the downstream latency reaches the caller in full, breaching the latency SLO, '
+      + 'but every caller still gets the real catalog within the injected worst case plus 500 ms.',
+    // Injected worst case is 2000 + 500 ms; 3 s leaves room for the hop itself.
+    thresholds: {
+      http_req_failed: ['rate<0.01'],
+      checks: ['rate>0.99'],
+      http_req_duration: ['p(99)<3000']
+    },
+    expectations: [
+      { kind: 'slo', metric: 'http_req_duration', outcome: 'breached' },
+      { kind: 'phase-slos', outcome: 'met' }
+    ],
     toxics: [LATENCY_TOXIC]
   },
   {
@@ -66,8 +86,18 @@ const PHASES = [
     name: 'Bandwidth starvation and payload slicing',
     targetPath: '/products/naive',
     chaos: 'bandwidth 10 KB/s + 10-byte slices',
-    hypothesis: 'A starved, fragmented downstream link pushes response times past the latency SLO.',
-    expectations: [{ kind: 'slo', metric: 'http_req_duration', outcome: 'breached' }],
+    hypothesis: 'A starved, fragmented downstream link pushes response times past the latency SLO, '
+      + 'while the catalog still arrives intact and well within a second.',
+    // The catalog is about 1 KB, so 10 KB/s plus slicing costs a few hundred ms.
+    thresholds: {
+      http_req_failed: ['rate<0.01'],
+      checks: ['rate>0.99'],
+      http_req_duration: ['p(95)<1000']
+    },
+    expectations: [
+      { kind: 'slo', metric: 'http_req_duration', outcome: 'breached' },
+      { kind: 'phase-slos', outcome: 'met' }
+    ],
     toxics: [
       {
         name: 'bandwidth_downstream',
@@ -91,11 +121,20 @@ const PHASES = [
     targetPath: '/products/resilient',
     chaos: 'latency 2000ms +/- 500ms',
     hypothesis: 'Under the same latency as phase 2 the circuit breaker sheds the slow calls: '
-      + 'callers get the degraded fallback instead of errors, and tail latency stays below phase 2.',
+      + 'the circuit opens, callers get the degraded fallback instead of errors, and tail latency stays below phase 2.',
+    // Degraded responses are the point of this phase, so only errors and
+    // latency are bounded. p99 is capped by the breaker's 800 ms timeout,
+    // which applies to the calls made before the circuit opens.
+    thresholds: {
+      http_req_failed: ['rate<0.01'],
+      http_req_duration: ['p(95)<200', 'p(99)<1000']
+    },
     expectations: [
       { kind: 'slo', metric: 'http_req_failed', outcome: 'met' },
       { kind: 'slo', metric: 'degraded_responses', outcome: 'breached' },
-      { kind: 'lower-than-phase', stat: 'p95', phase: 2 }
+      { kind: 'lower-than-phase', stat: 'p95', phase: 2 },
+      { kind: 'phase-slos', outcome: 'met' },
+      { kind: 'breaker-event', event: 'open', outcome: 'occurred' }
     ],
     toxics: [LATENCY_TOXIC]
   }
@@ -115,30 +154,35 @@ function compose(args, { allowFailure = false } = {}) {
 }
 
 // Retries only network-level failures (no HTTP response at all), which a
-// reused keep-alive socket can produce; HTTP errors are reported immediately.
-async function toxiproxy(method, urlPath, body, attempts = 3) {
+// reused keep-alive socket can produce after a long k6 run; HTTP errors are
+// reported immediately. `label` names the request in messages.
+async function fetchRetryingNetworkErrors(label, url, init, attempts = 3) {
   for (let attempt = 1; ; attempt++) {
     let res;
     try {
-      res = await fetch(`${TOXIPROXY_API}${urlPath}`, {
-        method,
-        headers: body ? { 'Content-Type': 'application/json' } : undefined,
-        body: body ? JSON.stringify(body) : undefined
-      });
+      res = await fetch(url, init);
     } catch (error) {
       const reason = error.cause ? `${error.message}: ${error.cause.message}` : error.message;
       if (attempt >= attempts) {
-        throw new Error(`Toxiproxy ${method} ${urlPath} failed: ${reason}`);
+        throw new Error(`${label} failed: ${reason}`);
       }
-      console.warn(`- Toxiproxy ${method} ${urlPath} failed (${reason}), retrying`);
+      console.warn(`- ${label} failed (${reason}), retrying`);
       await delay(1000);
       continue;
     }
     if (!res.ok) {
-      throw new Error(`Toxiproxy ${method} ${urlPath} returned ${res.status}: ${await res.text()}`);
+      throw new Error(`${label} returned ${res.status}: ${await res.text()}`);
     }
     return res;
   }
+}
+
+function toxiproxy(method, urlPath, body) {
+  return fetchRetryingNetworkErrors(`Toxiproxy ${method} ${urlPath}`, `${TOXIPROXY_API}${urlPath}`, {
+    method,
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined
+  });
 }
 
 // Polls `probe` until it resolves true; probe errors count as "not ready yet".
@@ -181,6 +225,15 @@ async function waitForCatalogThroughGateway() {
   });
 }
 
+async function scrapeBreaker() {
+  const res = await fetchRetryingNetworkErrors('Gateway GET /metrics', `${GATEWAY_URL}/metrics`);
+  const reading = readBreakerMetrics(await res.text(), BREAKER_NAME);
+  if (!reading) {
+    throw new Error(`Gateway /metrics does not expose circuit breaker ${BREAKER_NAME}`);
+  }
+  return reading;
+}
+
 async function clearToxics() {
   const res = await toxiproxy('GET', `/proxies/${PROXY.name}/toxics`);
   for (const toxic of await res.json()) {
@@ -200,7 +253,11 @@ async function applyToxics(toxics) {
 // else means the run itself failed and its numbers cannot be trusted.
 function runK6(phase) {
   const summaryFile = `phase${phase.id}_summary.json`;
-  const k6Env = [`TARGET_PATH=${phase.targetPath}`];
+  const k6Env = [
+    `TARGET_PATH=${phase.targetPath}`,
+    `PHASE_ID=${phase.id}`,
+    `PHASE_THRESHOLDS=${JSON.stringify(phase.thresholds)}`
+  ];
   for (const name of K6_OVERRIDES) {
     if (process.env[name]) k6Env.push(`${name}=${process.env[name]}`);
   }
@@ -247,16 +304,21 @@ async function main() {
       console.log(`\n--- Phase ${phase.id}: ${phase.name} (${phase.targetPath}, chaos: ${phase.chaos}) ---`);
       await clearToxics();
       await applyToxics(phase.toxics);
+      const breakerBefore = await scrapeBreaker();
       const outcome = runK6(phase);
+      const circuitBreaker = diffBreakerMetrics(breakerBefore, await scrapeBreaker());
       await clearToxics();
-      console.log(`Phase ${phase.id}: k6 thresholds ${outcome.thresholdsPassed ? 'met' : 'breached'}`);
+      console.log(`Phase ${phase.id}: k6 thresholds ${outcome.thresholdsPassed ? 'met' : 'breached'}, `
+        + `circuit breaker ${circuitBreaker.stateAfter} (opened ${circuitBreaker.events.open}x)`);
       manifest.phases.push({
         id: phase.id,
         name: phase.name,
         targetPath: phase.targetPath,
         chaos: phase.chaos,
         hypothesis: phase.hypothesis,
+        thresholds: phase.thresholds,
         expectations: phase.expectations,
+        circuitBreaker,
         ...outcome
       });
     }
@@ -268,8 +330,9 @@ async function main() {
     console.log(`\nAll ${PHASES.length} phases completed; results in ${path.relative(ROOT, RESULTS_DIR)}/`);
     for (const phase of report.phases) {
       const slos = phase.slosMet ? 'met' : 'breached';
+      const phaseSlos = phase.phaseSlosMet === null ? 'none set' : (phase.phaseSlosMet ? 'met' : 'breached');
       const verdict = phase.hypothesisConfirmed ? 'confirmed' : 'NOT confirmed';
-      console.log(`Phase ${phase.id}: baseline SLOs ${slos}, hypothesis ${verdict}`);
+      console.log(`Phase ${phase.id}: baseline SLOs ${slos}, phase SLOs ${phaseSlos}, hypothesis ${verdict}`);
     }
   } finally {
     if (KEEP_STACK_UP) {
